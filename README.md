@@ -1,2 +1,2 @@
-# flysystem-oss
-Flysystem adapter for the OSS storage.
+# flysystem-aliyun-oss
+Flysystem adapter for the AliYun OSS storage.

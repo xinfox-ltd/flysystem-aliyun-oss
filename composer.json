@@ -1,0 +1,20 @@
+{
+  "name": "enoliu/flysystem-oss",
+  "description": "Flysystem adapter for the AliYun OSS storage.",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "enoliu",
+      "email": "595929049@qq.com"
+    }
+  ],
+  "require": {
+    "league/flysystem": "^1.0",
+    "aliyuncs/oss-sdk-php": "^2.4"
+  },
+  "autoload": {
+    "psr-4": {
+      "XinFox\\Flysystem\\AliYun\\": "src"
+    }
+  }
+}
