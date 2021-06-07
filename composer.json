@@ -1,5 +1,5 @@
 {
-  "name": "enoliu/flysystem-aliyun-oss",
+  "name": "xinfox/flysystem-aliyun-oss",
   "description": "Flysystem adapter for the AliYun OSS storage.",
   "license": "MIT",
   "authors": [
