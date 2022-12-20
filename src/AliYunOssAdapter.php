@@ -3,317 +3,229 @@
 /**
  * [XinFox System] Copyright (c) 2011 - 2021 XINFOX.CN
  */
+
 declare(strict_types=1);
 
 namespace XinFox\Flysystem\AliYun;
 
-use League\Flysystem\Adapter\AbstractAdapter;
 use League\Flysystem\Config;
-use League\Flysystem\Util;
+use League\Flysystem\FileAttributes;
+use League\Flysystem\FilesystemAdapter;
+use League\Flysystem\UnableToWriteFile;
 
-class AliYunOssAdapter extends AbstractAdapter
+class AliYunOssAdapter implements FilesystemAdapter
 {
     protected OssClient $ossClient;
 
     protected string $bucket;
 
-    protected array $options = [];
-
-    public function __construct(OssClient $ossClient, string $bucket, $prefix = '', array $options = [])
+    public function __construct(OssClient $ossClient, string $bucket)
     {
         $this->ossClient = $ossClient;
         $this->bucket = $bucket;
-        $this->setPathPrefix(ltrim($prefix, '/'));
-        $this->options = array_merge($this->options, $options);
     }
 
-    public function write($path, $contents, Config $config)
+    public function directoryExists(string $path): bool
     {
-        $object = $this->applyPathPrefix($path);
-        $options = $this->getOptionsFromConfig($config);
-
-        if (!isset($options[OssClient::OSS_LENGTH])) {
-            $options[OssClient::OSS_LENGTH] = Util::contentSize($contents);
-        }
-
-        if (!isset($options[OssClient::OSS_CONTENT_TYPE])) {
-            $options[OssClient::OSS_CONTENT_TYPE] = Util::guessMimeType($path, $contents);
-        }
-
-        $this->ossClient->putObject($this->bucket, $object, $contents, $options);
-
-        $type = 'file';
-        $result = compact('type', 'path', 'contents');
-        $result['mimetype'] = $options[OssClient::OSS_CONTENT_TYPE];
-        $result['size'] = $options[OssClient::OSS_LENGTH];
-
-        return $result;
+        return $this->client->doesObjectExist($this->bucket, $path);
     }
 
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function writeStream($path, $resource, Config $config): bool
+    public function fileExists(string $path): bool
     {
-        if (!is_resource($resource)) {
-            return false;
+        return $this->client->doesObjectExist($this->bucket, $path);
+    }
+
+    public function write(string $path, string $contents, Config $config): void
+    {
+        $this->client->putObject($this->bucket, $path, $contents, $this->getOssOptions($config));
+    }
+
+    public function writeStream(string $path, $contents, Config $config): void
+    {
+        if (!is_resource($contents)) {
+            throw UnableToWriteFile::atLocation($path, 'The contents is invalid resource.');
         }
-        $object = $this->applyPathPrefix($path);
         $i = 0;
-        $bufferSize = 1000000; // 1M
-        while (!feof($resource)) {
-            if (false === $buffer = fread($resource, $block = $bufferSize)) {
-                return false;
+        $bufferSize = 1024 * 1024;
+        while (!feof($contents)) {
+            if (false === $buffer = fread($contents, $bufferSize)) {
+                throw UnableToWriteFile::atLocation($path, 'fread failed');
             }
             $position = $i * $bufferSize;
-            $this->ossClient->appendObject(
-                $this->bucket,
-                $object,
-                $buffer,
-                $position,
-                $this->getOptionsFromConfig($config)
-            );
-            $i++;
+            $this->client->appendObject($this->bucket, $path, $buffer, $position, $this->getOssOptions($config));
+            ++$i;
         }
-        fclose($resource);
-        return true;
+        fclose($contents);
     }
 
-    public function update($path, $contents, Config $config)
+    public function read(string $path): string
     {
-        $object = $this->applyPathPrefix($path);
-        return $this->ossClient->putObject($this->bucket, $object, $contents, $this->getOptionsFromConfig($config));
+        return $this->client->getObject($this->bucket, $path);
     }
 
-    public function updateStream($path, $resource, Config $config)
+    public function readStream(string $path)
     {
-        $object = $this->applyPathPrefix($path);
-        $result = $this->write($object, stream_get_contents($resource), $config);
-        if (is_resource($resource)) {
-            fclose($resource);
-        }
-        return $result;
-    }
-
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function rename($path, $newpath)
-    {
-        $this->copy($path, $newpath);
-        $this->delete($path);
-    }
-
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function copy($path, $newpath)
-    {
-        $object = $this->applyPathPrefix($path);
-        $newObject = $this->applyPathPrefix($newpath);
-
-        $this->ossClient->copyObject($this->bucket, $object, $this->bucket, $newObject);
-    }
-
-    public function delete($path)
-    {
-        $object = $this->applyPathPrefix($path);
-        $this->ossClient->deleteObject($this->bucket, $object);
-    }
-
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function deleteDir($dirname)
-    {
-        $list = $this->listContents($dirname, true);
-
-        $objects = [];
-        foreach ($list as $val) {
-            if ($val['type'] === 'file') {
-                $objects[] = $this->applyPathPrefix($val['path']);
-            } else {
-                $objects[] = $this->applyPathPrefix($val['path']) . '/';
-            }
+        $body = $this->read($path);
+        $resource = fopen('php://temp', 'r+');
+        if ($body !== '') {
+            fwrite($resource, $body);
+            fseek($resource, 0);
         }
 
-        $this->ossClient->deleteObjects($this->bucket, $objects);
+        return $resource;
+
+        //     try {
+        //         $stream = fopen('php://temp', 'w+b');
+        //         fwrite($stream, $this->read($path));
+        //         rewind($stream);
+        //     } catch (OssException $exception) {
+        //         return false;
+        //      }
+
+        //    return compact('stream', 'path');
     }
 
-    public function createDir($dirname, Config $config)
+    public function delete(string $path): void
     {
-        $this->ossClient->createObjectDir($this->bucket, $dirname);
+        $this->client->deleteObject($this->bucket, $path);
     }
 
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function setVisibility($path, $visibility)
+    public function deleteDirectory(string $path): void
     {
-        $object = $this->applyPathPrefix($path);
-        $this->ossClient->putObjectAcl(
+        $lists = $this->listContents($path, true);
+        if (!$lists) {
+            return;
+        }
+        $objectList = [];
+        foreach ($lists as $value) {
+            $objectList[] = $value['path'];
+        }
+        $this->client->deleteObjects($this->bucket, $objectList);
+    }
+
+    public function createDirectory(string $path, Config $config): void
+    {
+        $this->client->createObjectDir($this->bucket, $path);
+    }
+
+    public function setVisibility(string $path, string $visibility): void
+    {
+        $this->client->putObjectAcl(
             $this->bucket,
-            $object,
+            $path,
             ($visibility == 'public') ? 'public-read' : 'private'
         );
     }
 
-    public function has($path)
+    public function visibility(string $path): FileAttributes
     {
-        $object = $this->applyPathPrefix($path);
-        return $this->ossClient->doesObjectExist($this->bucket, $object);
+        $response = $this->client->getObjectAcl($this->bucket, $path);
+        return new FileAttributes($path, null, $response);
     }
 
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function read($path): array
+    public function mimeType(string $path): FileAttributes
     {
-        return $this->getMetadata($path);
+        $response = $this->client->getObjectMeta($this->bucket, $path);
+        return new FileAttributes($path, null, null, null, $response['content-type']);
     }
 
-    public function readStream($path): array
+    public function lastModified(string $path): FileAttributes
     {
-        $object = $this->applyPathPrefix($path);
-        $resource = "https://" . $this->bucket . '.' . $this->ossClient->getEndpoint()
-            . '/' . ltrim($object, '/');
-        return [
-            'stream' => fopen($resource, 'r')
-        ];
+        $response = $this->client->getObjectMeta($this->bucket, $path);
+        return new FileAttributes($path, null, null, $response['last-modified']);
     }
 
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function listContents($directory = '', $recursive = false): array
+    public function fileSize(string $path): FileAttributes
     {
-        $directory = rtrim($this->applyPathPrefix($directory), '\\/');
-        if ($directory) {
-            $directory .= '/';
+        $response = $this->client->getObjectMeta($this->bucket, $path);
+        $fileSize = null;
+        if (isset($response['content-length'])) {
+            $fileSize = (int) $response['content-length'];
         }
+        return new FileAttributes($path, $fileSize);
+    }
 
-        $bucket = $this->bucket;
-        $delimiter = '/';
-        $nextMarker = '';
-        $options = [
-            'delimiter' => $delimiter,
-            'prefix' => $directory,
-            'max-keys' => 1000,
-            'marker' => $nextMarker,
-        ];
-
-        $listObjectInfo = $this->ossClient->listObjects($bucket, $options);
-
-        $objectList = $listObjectInfo->getObjectList(); // 文件列表
-        $prefixList = $listObjectInfo->getPrefixList(); // 目录列表
+    public function listContents(string $path, bool $deep): iterable
+    {
+        $directory = rtrim($path, '\\/');
 
         $result = [];
-        foreach ($objectList as $objectInfo) {
-            if ($objectInfo->getSize() === 0 && $directory === $objectInfo->getKey()) {
-                $result[] = [
-                    'type' => 'dir',
-                    'path' => $this->removePathPrefix(rtrim($objectInfo->getKey(), '/')),
-                    'timestamp' => strtotime($objectInfo->getLastModified()),
-                ];
-                continue;
-            }
-
-            $result[] = [
-                'type' => 'file',
-                'path' => $this->removePathPrefix($objectInfo->getKey()),
-                'timestamp' => strtotime($objectInfo->getLastModified()),
-                'size' => $objectInfo->getSize(),
+        $nextMarker = '';
+        while (true) {
+            // max-keys 用于限定此次返回object的最大数，如果不设定，默认为100，max-keys取值不能大于1000。
+            // prefix   限定返回的object key必须以prefix作为前缀。注意使用prefix查询时，返回的key中仍会包含prefix。
+            // delimiter是一个用于对Object名字进行分组的字符。所有名字包含指定的前缀且第一次出现delimiter字符之间的object作为一组元素
+            // marker   用户设定结果从marker之后按字母排序的第一个开始返回。
+            $options = [
+                'max-keys' => 1000,
+                'prefix' => $directory . '/',
+                'delimiter' => '/',
+                'marker' => $nextMarker,
             ];
-        }
+            $res = $this->client->listObjects($this->bucket, $options);
 
-        foreach ($prefixList as $prefixInfo) {
-            if ($recursive) {
-                $next = $this->listContents($this->removePathPrefix($prefixInfo->getPrefix()), $recursive);
-                $result = array_merge($result, $next);
-            } else {
-                $result[] = [
-                    'type' => 'dir',
-                    'path' => $this->removePathPrefix(rtrim($prefixInfo->getPrefix(), '/')),
-                    'timestamp' => 0,
-                ];
+            // 得到nextMarker，从上一次$res读到的最后一个文件的下一个文件开始继续获取文件列表
+            $nextMarker = $res->getNextMarker();
+            $prefixList = $res->getPrefixList(); // 目录列表
+            $objectList = $res->getObjectList(); // 文件列表
+            if ($prefixList) {
+                foreach ($prefixList as $value) {
+                    $result[] = [
+                        'type' => 'dir',
+                        'path' => $value->getPrefix(),
+                    ];
+                    if ($deep) {
+                        $result = array_merge($result, $this->listContents($value->getPrefix(), $deep));
+                    }
+                }
+            }
+            if ($objectList) {
+                foreach ($objectList as $value) {
+                    if (($value->getSize() === 0) && ($value->getKey() === $directory . '/')) {
+                        continue;
+                    }
+                    $result[] = [
+                        'type' => 'file',
+                        'path' => $value->getKey(),
+                        'timestamp' => strtotime($value->getLastModified()),
+                        'size' => $value->getSize(),
+                    ];
+                }
+            }
+            if ($nextMarker === '') {
+                break;
             }
         }
 
         return $result;
     }
 
-    /**
-     * @param string $path
-     * @return array
-     * @throws \OSS\Core\OssException
-     */
-    public function getMetadata($path): array
+    public function move(string $source, string $destination, Config $config): void
     {
-        $object = $this->applyPathPrefix($path);
-
-        $result = $this->ossClient->getObjectMeta($this->bucket, $object);
-
-        return [
-            'type' => 'file',
-            'dirname' => Util::dirname($path),
-            'path' => $path,
-            'timestamp' => strtotime($result['last-modified']),
-            'mimetype' => $result['content-type'],
-            'size' => $result['content-length'],
-        ];
+        $this->client->copyObject($this->bucket, $source, $this->bucket, $destination);
+        $this->client->deleteObject($this->bucket, $source);
     }
 
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function getSize($path): array
+    public function copy(string $source, string $destination, Config $config): void
     {
-        return $this->getMetadata($path);
+        $this->client->copyObject($this->bucket, $source, $this->bucket, $destination);
     }
 
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function getMimetype($path): array
-    {
-        return $this->getMetadata($path);
-    }
-
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function getTimestamp($path): array
-    {
-        return $this->getMetadata($path);
-    }
-
-    /**
-     * @throws \OSS\Core\OssException
-     */
-    public function getVisibility($path): array
-    {
-        $response = $this->ossClient->getObjectAcl($this->bucket, $path);
-        return [
-            'visibility' => $response,
-        ];
-    }
-
-    private function getOptionsFromConfig(Config $config): array
+    private function getOssOptions(Config $config): array
     {
         $options = [];
-        if ($config->has("headers")) {
-            $options['headers'] = $config->get("headers");
+        if ($headers = $config->get('headers')) {
+            $options['headers'] = $headers;
         }
 
-        if ($config->has("Content-Type")) {
-            $options["Content-Type"] = $config->get("Content-Type");
+        if ($contentType = $config->get('Content-Type')) {
+            $options['Content-Type'] = $contentType;
         }
 
-        if ($config->has("Content-Md5")) {
-            $options["Content-Md5"] = $config->get("Content-Md5");
-            $options["checkmd5"] = false;
+        if ($contentMd5 = $config->get('Content-Md5')) {
+            $options['Content-Md5'] = $contentMd5;
+            $options['checkmd5'] = false;
         }
-
         return $options;
     }
 }
